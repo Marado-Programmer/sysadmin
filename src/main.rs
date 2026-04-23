@@ -1,5 +1,5 @@
 use chrono::Utc;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use regex::Regex;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -36,6 +36,8 @@ enum Commands {
     DnsMasterZone(DnsMasterZoneArgs),
     /// Configures Apache HTTPD VirtualHost
     HttpdVhost(HttpdVhostArgs),
+    /// Manages DNS records in an existing master zone file
+    DnsRecord(DnsRecordArgs),
 }
 
 #[derive(clap::Args)]
@@ -59,6 +61,36 @@ struct HttpdVhostArgs {
     /// Default to 0.0.0.0 (all interfaces)
     #[arg(long, short, default_value = "0.0.0.0")]
     ip: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum DnsRecordType {
+    A,
+    AAAA,
+    CNAME,
+    MX,
+    NS,
+    PTR,
+    // SOA is managed internally, not directly by user via this command
+}
+
+#[derive(clap::Args)]
+struct DnsRecordArgs {
+    /// The domain name for which to add or modify a record
+    #[arg(value_name = "DOMAIN")]
+    domain: String,
+
+    /// The name of the host/subdomain (e.g., 'www', '@', 'mail')
+    #[arg(value_name = "HOST")]
+    host: String,
+
+    /// The type of DNS record to create
+    #[arg(value_enum)]
+    record_type: DnsRecordType,
+
+    /// The value for the DNS record (e.g., IP address, canonical name, mail host)
+    #[arg(value_name = "VALUE")]
+    value: String,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -101,6 +133,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\tDomain:\t{}", args.domain);
             println!("\tIP:\t{}", args.ip);
             handle_httpd_vhost_command(&args.domain, &args.ip)?;
+        }
+        Some(Commands::DnsRecord(args)) => {
+            println!("Adding/Modifying DNS Record:");
+            println!("\tDomain:\t{}", args.domain);
+            println!("\tHost:\t{}", args.host);
+            println!("\tType:\t{:?}", args.record_type);
+            println!("\tValue:\t{}", args.value);
+            if let Some(p) = args.priority {
+                println!("\tPriority:\t{}", p);
+            }
+            handle_dns_record_command(args)?;
         }
         None => {}
     }
@@ -209,7 +252,6 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
             .append(true)
             .open(temp_path)?;
         writeln!(writer_append, "{}", zone_definition)?;
-    } else {
     }
 
     fs::rename(temp_path, named_conf_path)?;
@@ -225,16 +267,16 @@ fn create_zone_file(zone_file_path: &Path, domain: &str, ip: &str) -> io::Result
 
     let content = format!(
         r#"$ttl 38400
-    @   IN  SOA {domain}.   (
-                    {serial} ; serial
-                    10800 ; refresh
-                    3600 ; retry
-                    604800 ; expire
-                    38400 ; minimum
-                    )
-        IN  NS  {domain}.
-        IN  A   {ip}
-    "#
+        @   IN  SOA {domain}.   (
+                        {serial} ; serial
+                        10800 ; refresh
+                        3600 ; retry
+                        604800 ; expire
+                        38400 ; minimum
+                        )
+            IN  NS  {domain}.
+            IN  A   {ip}
+        "#
     );
 
     let mut file = OpenOptions::new()
@@ -328,10 +370,10 @@ fn ensure_httpd_listen_directive(httpd_conf_path: &Path, ip: &str) -> io::Result
         let line = line_result?;
         let trimmed_line = line.trim();
 
-        if trimmed_line.starts_with("Listen ") && trimmed_line.contains(":80") {
+        if trimmed_line == listen_directive_to_add {
             found_listen = true;
             writeln!(writer, "{}", line)?;
-        } else if trimmed_line.starts_with("Listen 80") {
+        } else if trimmed_line == "Listen 80" || trimmed_line == "Listen *:80" {
             found_listen = true;
             writeln!(writer, "{}", line)?;
         } else {
@@ -349,5 +391,74 @@ fn ensure_httpd_listen_directive(httpd_conf_path: &Path, ip: &str) -> io::Result
     }
 
     fs::rename(temp_path, httpd_conf_path)?;
+    Ok(())
+}
+
+fn handle_dns_record_command(args: &DnsRecordArgs) -> io::Result<()> {
+    let zone_file_path = PathBuf::from(format!("/var/named/{}.hosts", args.domain));
+
+    if !zone_file_path.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "Zone file '{}' not found. Please create the master zone first using `dns-master-zone`.",
+                zone_file_path.display()
+            ),
+        ));
+    }
+
+    let file = File::open(&zone_file_path)?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = reader.lines().filter_map(Result::ok).collect();
+
+    let mut updated_serial = None;
+    let soa_regex = Regex::new(r"(\s+\d+)\s*;\s*serial").unwrap();
+
+    for line in &mut lines {
+        if line.contains("IN SOA") {
+            if let Some(caps) = soa_regex.captures(line) {
+                if let Some(serial_match) = caps.get(1) {
+                    let current_serial_str = serial_match.as_str().trim();
+                    if let Ok(current_serial) = current_serial_str.parse::<u64>() {
+                        updated_serial = Some(current_serial + 1);
+                        *line = line
+                            .replace(current_serial_str, &format!("{}", updated_serial.unwrap()));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    if updated_serial.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Could not find or parse SOA serial in zone file.",
+        ));
+    }
+
+    let new_record_line = match args.record_type {
+        DnsRecordType::A => format!("{}\tIN\tA\t{}", args.host, args.value),
+        DnsRecordType::AAAA => format!("{}\tIN\tAAAA\t{}", args.host, args.value),
+        DnsRecordType::CNAME => format!("{}\tIN\tCNAME\t{}", args.host, args.value),
+        DnsRecordType::MX => format!("{}\tIN\tMX\t{}", args.host, args.value),
+        DnsRecordType::NS => format!("{}\tIN\tNS\t{}", args.host, args.value),
+        DnsRecordType::PTR => format!("{}\tIN\tPTR\t{}", args.host, args.value),
+    };
+
+    lines.push(new_record_line.clone());
+
+    let temp_file =
+        NamedTempFile::new_in(zone_file_path.parent().unwrap_or_else(|| Path::new("/tmp")))?;
+    let temp_path = temp_file.path();
+    let mut writer = BufWriter::new(File::create(temp_path)?);
+
+    for line in lines {
+        writeln!(writer, "{}", line)?;
+    }
+    writer.flush()?;
+
+    fs::rename(temp_path, &zone_file_path)?;
+
     Ok(())
 }
