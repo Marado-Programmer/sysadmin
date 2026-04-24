@@ -38,6 +38,8 @@ enum Commands {
     HttpdVhost(HttpdVhostArgs),
     /// Manages DNS records in an existing master zone file
     DnsRecord(DnsRecordArgs),
+    /// Delete domain (DNS + Apache)
+    DeleteDomain(DeleteDomainArgs),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -111,6 +113,21 @@ struct DnsRecordArgs {
     value: String,
 }
 
+#[derive(clap::Args)]
+struct DeleteDomainArgs {
+    /// Domain name (example.com)
+    #[arg(short, long)]
+    domain: String,
+
+    /// Delete reverse zone too
+    #[arg(long, default_value_t = false)]
+    reverse: bool,
+
+    /// IP (needed if reverse=true)
+    #[arg(long)]
+    ip: Option<String>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -162,6 +179,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\tValue:\t{}", args.value);
             handle_dns_record_command(args)?;
         }
+        Some(Commands::DeleteDomain(args)) => {
+            println!("Deleting Domain:");
+            println!("\tDomain:\t{}", args.domain);
+            if let Some(ip) = &args.ip {
+                println!("\tIP/Network:\t{}", ip);
+            }
+            handle_delete_domain(args)?;
+        }
         None => {}
     }
 
@@ -173,11 +198,10 @@ fn handle_dns_master_zone_command(args: &DnsMasterZoneArgs) -> io::Result<()> {
     let named_conf_path = PathBuf::from("/etc/named.conf");
     let zone_file_path = PathBuf::from(format!("/var/named/{zone_filename}"));
 
-    edit_named_conf(&named_conf_path, &args.domain, &args.zone_type)?;
+    edit_named_conf(&named_conf_path, &args.domain)?;
 
     create_zone_file(
         &zone_file_path,
-        &args.domain,
         &args.ip,
         &args.zone_type,
         &args.ns_fqdn,
@@ -188,7 +212,7 @@ fn handle_dns_master_zone_command(args: &DnsMasterZoneArgs) -> io::Result<()> {
     Ok(())
 }
 
-fn edit_named_conf(named_conf_path: &Path, domain: &str, zone_type: &ZoneType) -> io::Result<()> {
+fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
     let file = File::open(named_conf_path)?;
     let reader = BufReader::new(file);
 
@@ -288,7 +312,6 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str, zone_type: &ZoneType) -
 
 fn create_zone_file(
     zone_file_path: &Path,
-    domain: &str,
     ip_or_network: &str,
     zone_type: &ZoneType,
     ns_fqdn: &str,
@@ -515,5 +538,85 @@ fn handle_dns_record_command(args: &DnsRecordArgs) -> io::Result<()> {
 
     fs::rename(temp_path, &zone_file_path)?;
 
+    Ok(())
+}
+
+fn handle_delete_domain(args: &DeleteDomainArgs) -> Result<(), Box<dyn std::error::Error>> {
+    delete_dns_zone(&args.domain)?;
+    delete_virtual_host(&args.domain)?;
+
+    if args.reverse
+        && let Some(ip) = &args.ip
+    {
+        delete_reverse_zone(&ip, &args.domain)?;
+    }
+
+    println!("Domain {} removed successfully", args.domain);
+    Ok(())
+}
+
+fn delete_dns_zone(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let named_conf_path = "/etc/named.conf";
+    let zone_file = format!("/var/named/{}.hosts", domain);
+
+    let content = std::fs::read_to_string(named_conf_path)?;
+    let new_content = content
+        .lines()
+        .filter(|line| !line.contains(&format!("\"{}\"", domain)))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    std::fs::write(named_conf_path, new_content)?;
+
+    if std::path::Path::new(&zone_file).exists() {
+        std::fs::remove_file(zone_file)?;
+    }
+
+    println!("DNS zone removed: {}", domain);
+    Ok(())
+}
+
+fn delete_virtual_host(domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let vhost_file = format!("/etc/httpd/conf.d/{}.conf", domain);
+    let web_root = format!("/var/www/html/{}", domain);
+
+    if std::path::Path::new(&vhost_file).exists() {
+        std::fs::remove_file(&vhost_file)?;
+    }
+
+    if std::path::Path::new(&web_root).exists() {
+        std::fs::remove_dir_all(&web_root)?;
+    }
+
+    println!("VirtualHost removed: {}", domain);
+    Ok(())
+}
+
+fn delete_reverse_zone(ip: &str, domain: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() != 4 {
+        return Err("Invalid IP format".into());
+    }
+
+    let reverse_zone = format!("{}.{}.{}.{}", parts[2], parts[1], parts[0], domain);
+
+    let zone_file = format!("/var/named/{}.hosts", reverse_zone);
+
+    let named_conf_path = "/etc/named.conf";
+    let content = std::fs::read_to_string(named_conf_path)?;
+
+    let new_content = content
+        .lines()
+        .filter(|line| !line.contains(&reverse_zone))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    std::fs::write(named_conf_path, new_content)?;
+
+    if std::path::Path::new(&zone_file).exists() {
+        std::fs::remove_file(zone_file)?;
+    }
+
+    println!("Reverse zone removed: {}", reverse_zone);
     Ok(())
 }
