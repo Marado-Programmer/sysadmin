@@ -555,7 +555,7 @@ fn handle_dns_record_command(args: &DnsRecordArgs) -> io::Result<()> {
         DnsRecordType::A => format!("{}\tIN\tA\t{}", args.host, args.value),
         DnsRecordType::AAAA => format!("{}\tIN\tAAAA\t{}", args.host, args.value),
         DnsRecordType::CNAME => format!("{}\tIN\tCNAME\t{}", args.host, args.value),
-        DnsRecordType::MX => format!("{}\tIN\tMX\t{}", args.host, args.value),
+        DnsRecordType::MX => format!("{}\tIN\tMX\t10\t{}", args.host, args.value),
         DnsRecordType::NS => format!("{}\tIN\tNS\t{}", args.host, args.value),
         DnsRecordType::PTR => format!("{}\tIN\tPTR\t{}", args.host, args.value),
     };
@@ -658,7 +658,10 @@ fn delete_reverse_zone(ip: &str, domain: &str) -> Result<(), Box<dyn std::error:
 }
 
 fn handle_blacklist_add(args: &BlacklistArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let zone_file = PathBuf::from(format!("/var/named/blacklist/{}.zone", args.domain));
+    let zone_dir = PathBuf::from("/var/named/blacklist");
+    fs::create_dir_all(&zone_dir)?;
+
+    let zone_file = zone_dir.join(format!("{}.hosts", args.domain));
 
     create_zone_file(
         &zone_file,
@@ -668,6 +671,12 @@ fn handle_blacklist_add(args: &BlacklistArgs) -> Result<(), Box<dyn std::error::
         &args.soa_email,
     )?;
 
+    handle_dns_record_command(&DnsRecordArgs {
+        domain: args.domain.clone(),
+        host: String::from("@"),
+        record_type: DnsRecordType::A,
+        value: args.ip.clone(),
+    })?;
     handle_dns_record_command(&DnsRecordArgs {
         domain: args.domain.clone(),
         host: String::from("*"),
