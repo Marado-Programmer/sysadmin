@@ -32,7 +32,7 @@ enum Commands {
         #[arg(short, long)]
         list: bool,
     },
-    /// Manages DNS master zones
+    /// Manages DNS master zones (forward or reverse)
     DnsMasterZone(DnsMasterZoneArgs),
     /// Configures Apache HTTPD VirtualHost
     HttpdVhost(HttpdVhostArgs),
@@ -40,15 +40,33 @@ enum Commands {
     DnsRecord(DnsRecordArgs),
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum ZoneType {
+    Forward,
+    Reverse,
+}
+
 #[derive(clap::Args)]
 struct DnsMasterZoneArgs {
-    /// The domain name to create the master zone for
+    /// The domain name or reverse zone name to create (e.g., example.com or 0.168.192.example.com)
     #[arg(value_name = "DOMAIN")]
     domain: String,
 
-    /// The IP address of the DNS/Web server
-    #[arg(long, short, default_value = "192.168.0.1")]
+    /// The IP address for the DNS/Web server for forward zones, or the network for reverse zones (e.g., 192.168.0.0/24)
+    #[arg(long, short)]
     ip: String,
+
+    /// The type of zone to create (forward or reverse)
+    #[arg(value_enum, long, short, default_value_t = ZoneType::Forward)]
+    zone_type: ZoneType,
+
+    /// The FQDN of the primary DNS server (e.g., dns.example.com) - required for all zones
+    #[arg(long, short, value_name = "NS_FQDN")]
+    ns_fqdn: String,
+
+    /// The email for the SOA record (e.g., hostmaster.example.com)
+    #[arg(long, short, default_value = "hostmaster.example.com")]
+    soa_email: String,
 }
 
 #[derive(clap::Args)]
@@ -76,11 +94,11 @@ enum DnsRecordType {
 
 #[derive(clap::Args)]
 struct DnsRecordArgs {
-    /// The domain name for which to add or modify a record
+    /// The domain name (forward or reverse) for which to add or modify a record
     #[arg(value_name = "DOMAIN")]
     domain: String,
 
-    /// The name of the host/subdomain (e.g., 'www', '@', 'mail')
+    /// The name of the host/subdomain (e.g., 'www', '@', 'mail', or '1' for PTR records)
     #[arg(value_name = "HOST")]
     host: String,
 
@@ -88,7 +106,7 @@ struct DnsRecordArgs {
     #[arg(value_enum)]
     record_type: DnsRecordType,
 
-    /// The value for the DNS record (e.g., IP address, canonical name, mail host)
+    /// The value for the DNS record (e.g., IP address, canonical name, mail host, FQDN for PTR)
     #[arg(value_name = "VALUE")]
     value: String,
 }
@@ -123,10 +141,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         Some(Commands::DnsMasterZone(args)) => {
-            println!("Creating DNS Master Zone:");
+            println!("Creating DNS Master Zone ({:?}):", args.zone_type);
             println!("\tDomain:\t{}", args.domain);
-            println!("\tIP:\t{}", args.ip);
-            handle_dns_master_zone_command(&args.domain, &args.ip)?;
+            println!("\tIP/Network:\t{}", args.ip);
+            println!("\tNS FQDN:\t{}", args.ns_fqdn);
+            println!("\tSOA Email:\t{}", args.soa_email);
+            handle_dns_master_zone_command(args)?;
         }
         Some(Commands::HttpdVhost(args)) => {
             println!("Configuring Apache HTTPD VirtualHost:");
@@ -140,9 +160,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("\tHost:\t{}", args.host);
             println!("\tType:\t{:?}", args.record_type);
             println!("\tValue:\t{}", args.value);
-            if let Some(p) = args.priority {
-                println!("\tPriority:\t{}", p);
-            }
             handle_dns_record_command(args)?;
         }
         None => {}
@@ -151,19 +168,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn handle_dns_master_zone_command(domain: &str, ip: &str) -> io::Result<()> {
+fn handle_dns_master_zone_command(args: &DnsMasterZoneArgs) -> io::Result<()> {
+    let zone_filename = format!("{}.hosts", args.domain);
     let named_conf_path = PathBuf::from("/etc/named.conf");
-    let zone_file_path = PathBuf::from(format!("/var/named/{domain}.hosts"));
+    let zone_file_path = PathBuf::from(format!("/var/named/{zone_filename}"));
 
-    edit_named_conf(&named_conf_path, domain)?;
+    edit_named_conf(&named_conf_path, &args.domain, &args.zone_type)?;
 
-    create_zone_file(&zone_file_path, domain, ip)?;
+    create_zone_file(
+        &zone_file_path,
+        &args.domain,
+        &args.ip,
+        &args.zone_type,
+        &args.ns_fqdn,
+        &args.soa_email,
+    )?;
 
     println!("DNS Master Zone setup complete (manual `systemctl restart named` still needed)");
     Ok(())
 }
 
-fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
+fn edit_named_conf(named_conf_path: &Path, domain: &str, zone_type: &ZoneType) -> io::Result<()> {
     let file = File::open(named_conf_path)?;
     let reader = BufReader::new(file);
 
@@ -228,12 +253,15 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
     }
     writer.flush()?;
 
+    let zone_filename = format!("{}.hosts", domain);
+
     let zone_definition = format!(
         r#"
     zone "{domain}" IN {{
         type master;
-        file "/var/named/{domain}.hosts";
-    }}"#
+        file "/var/named/{zone_filename}";
+    }}
+    "#
     );
 
     let reader = BufReader::new(File::open(temp_path)?);
@@ -258,26 +286,53 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn create_zone_file(zone_file_path: &Path, domain: &str, ip: &str) -> io::Result<()> {
+fn create_zone_file(
+    zone_file_path: &Path,
+    domain: &str,
+    ip_or_network: &str,
+    zone_type: &ZoneType,
+    ns_fqdn: &str,
+    soa_email: &str,
+) -> io::Result<()> {
     if let Some(parent) = zone_file_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
     let serial = Utc::now().format("%Y%m%d%H").to_string();
 
-    let content = format!(
-        r#"$ttl 38400
-        @   IN  SOA {domain}.   (
-                        {serial} ; serial
-                        10800 ; refresh
-                        3600 ; retry
-                        604800 ; expire
-                        38400 ; minimum
-                        )
-            IN  NS  {domain}.
-            IN  A   {ip}
+    let content = match zone_type {
+        ZoneType::Forward => format!(
+            r#"$ttl 38400
+        @   IN  SOA {ns_fqdn}.  {soa_email}.    (
+                            {serial} ; serial
+                            10800 ; refresh
+                            3600 ; retry
+                            604800 ; expire
+                            38400 ; minimum
+                            )
+            IN  NS  {ns_fqdn}.
+            IN  A   {ip_or_network}
         "#
-    );
+        ),
+        ZoneType::Reverse => {
+            let ptr_ip_fragment = ip_or_network.split('.').last().unwrap_or("1");
+
+            format!(
+                r#"$ttl 38400
+            @   IN  SOA {ns_fqdn}.  {soa_email}.    (
+                                {serial} ; serial
+                                10800 ; refresh
+                                3600 ; retry
+                                604800 ; expire
+                                38400 ; minimum
+                                )
+                IN  NS  {ns_fqdn}.
+                IN  A   {ip_or_network}
+            {ptr_ip_fragment}   IN  PTR {ns_fqdn}.
+            "#
+            )
+        }
+    };
 
     let mut file = OpenOptions::new()
         .write(true)
