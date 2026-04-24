@@ -40,6 +40,10 @@ enum Commands {
     DnsRecord(DnsRecordArgs),
     /// Delete domain (DNS + Apache)
     DeleteDomain(DeleteDomainArgs),
+    /// Add domain to blacklist
+    BlacklistAdd(BlacklistArgs),
+    /// Remove domain from blacklist
+    BlacklistRemove(BlacklistArgs),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -128,6 +132,24 @@ struct DeleteDomainArgs {
     ip: Option<String>,
 }
 
+#[derive(clap::Args)]
+struct BlacklistArgs {
+    #[arg(short, long)]
+    domain: String,
+
+    /// Redirect IP (default = sinkhole)
+    #[arg(short, long, default_value = "0.0.0.0")]
+    ip: String,
+
+    /// The FQDN of the primary DNS server (e.g., dns.example.com) - required for all zones
+    #[arg(long, short, value_name = "NS_FQDN")]
+    ns_fqdn: String,
+
+    /// The email for the SOA record (e.g., hostmaster.example.com)
+    #[arg(long, short, default_value = "hostmaster.example.com")]
+    soa_email: String,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -186,6 +208,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("\tIP/Network:\t{}", ip);
             }
             handle_delete_domain(args)?;
+        }
+        Some(Commands::BlacklistAdd(args)) => {
+            println!("Blacklisting Domain:");
+            println!("\tDomain:\t{}", args.domain);
+            handle_blacklist_add(args)?;
+        }
+        Some(Commands::BlacklistRemove(args)) => {
+            println!("Whitelisting Domain:");
+            println!("\tDomain:\t{}", args.domain);
+            handle_delete_domain(&DeleteDomainArgs {
+                domain: String::from(&args.domain),
+                reverse: false,
+                ip: Some(String::from(&args.ip)),
+            })?;
         }
         None => {}
     }
@@ -618,5 +654,26 @@ fn delete_reverse_zone(ip: &str, domain: &str) -> Result<(), Box<dyn std::error:
     }
 
     println!("Reverse zone removed: {}", reverse_zone);
+    Ok(())
+}
+
+fn handle_blacklist_add(args: &BlacklistArgs) -> Result<(), Box<dyn std::error::Error>> {
+    let zone_file = PathBuf::from(format!("/var/named/blacklist/{}.zone", args.domain));
+
+    create_zone_file(
+        &zone_file,
+        &args.ip,
+        &ZoneType::Forward,
+        &args.ns_fqdn,
+        &args.soa_email,
+    )?;
+
+    handle_dns_record_command(&DnsRecordArgs {
+        domain: args.domain.clone(),
+        host: String::from("*"),
+        record_type: DnsRecordType::A,
+        value: args.ip.clone(),
+    })?;
+
     Ok(())
 }
