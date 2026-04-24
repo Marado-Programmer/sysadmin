@@ -171,3 +171,55 @@ adicionar à blacklist, e depois adicionamos um registo `*` do tipo `A` para
 `0.0.0.0`. O código de cima já faz isto tudo.
 
 Mais 2 pontos.
+
+# NFS
+
+> permitir a configuração do serviço NFS, permitir a criação de partilhas do
+> sistema de ficheiros no Linux no ficheiro “/etc/exports” para máquinas
+> Linux/Unix. Deverá: Criar partilha, eliminar partilha, alterar partilha,
+> desativar partilha. Deverá testar numa máquina Linux à parte o mapeamento NFS
+> criado através do comando “mount –t nfs ….”.
+
+É preciso fazer `dnf install nfs-utils net-tools` antes de tudo.
+
+A tarefa baseia-se em ler o ficheiro "/etc/exports" e editar cada linha conforme
+a necessidade.
+
+Sem muito segredo.
+
+Na máquina cliente depois, é necessário fazer
+`mount -t nfs <serverip>:/<nfs> <mountpoint>`.
+
+# Backups
+
+> Efetuar os backups de ficheiros e configurações cruciais ao sistema (ficheiros
+> das contas dos utilizadores e dos grupos), pode ser utilizado o utilitário
+> “tar”.
+>
+> Utilizar o “rsync” para efetuar backups “incremental for ever” das áreas dos
+> utilizadores do sistema.
+
+Não tem muito segredo. Pelo menos a primeira parte onde basta criar um tarball
+assim: `tar -czf backup.tar.gz /etc/passwd /etc/group /etc/shadow
+/etc/gshadow`.
+
+Agora para a parte do `rsync`, time que pesquisar sobre o "incremental for
+ever". Basicamente, após o primeiro uso do `rsync` para criação do backup, os
+próximos usos podem servir apenas para transferir apenas os ficheiros
+modificados. Isto é feito usando `--link-dest=<lastbackup>` como uma option do
+rsync após o primeiro backup.
+
+# RAID
+
+> Criar um raid nível 5 para segurança no armazenamento da informação. Deverá
+> introduzir o nome da diretoria a montar a nova drive.
+
+Com `mdadm` instalado (`dnf install mdadm`), faz:
+
+```
+mdadm --create --verbose /dev/md0 --level=5 \
+    --raid-devices=3 /dev/vdb /dev/vdc /dev/vdd \
+    --spare-devices=1 /dev/vde
+```
+
+Criar um filesystem para `/dev/md0`, e montá-lo.

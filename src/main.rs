@@ -44,6 +44,12 @@ enum Commands {
     BlacklistAdd(BlacklistArgs),
     /// Remove domain from blacklist
     BlacklistRemove(BlacklistArgs),
+    // Manage NFS
+    Nfs(NfsArgs),
+    // Backup users' system config files
+    Backup(BackupArgs),
+    // creates a level 5 RAID
+    Raid(RaidArgs),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -150,6 +156,67 @@ struct BlacklistArgs {
     soa_email: String,
 }
 
+#[derive(Subcommand)]
+enum NfsAction {
+    Add,
+    Remove,
+    Update,
+    Disable,
+}
+
+#[derive(clap::Args)]
+struct NfsArgs {
+    #[command(subcommand)]
+    action: NfsAction,
+
+    /// Directory to share
+    #[arg(short, long)]
+    path: String,
+
+    /// Allowed client (IP or subnet)
+    #[arg(short, long)]
+    client: String,
+
+    /// Options (rw,sync,no_root_squash,...)
+    #[arg(short, long, default_value = "ro,hide")]
+    options: String,
+}
+
+#[derive(Subcommand)]
+enum BackupAction {
+    Tar,
+    Rsync,
+}
+
+#[derive(clap::Args)]
+struct BackupArgs {
+    #[command(subcommand)]
+    action: BackupAction,
+
+    /// Source directory
+    #[arg(short, long)]
+    source: String,
+
+    /// Destination path
+    #[arg(short, long)]
+    destination: String,
+}
+
+#[derive(clap::Args)]
+struct RaidArgs {
+    /// Mount point (directory)
+    #[arg(short, long)]
+    mount_point: String,
+
+    /// Devices (e.g. /dev/sdb /dev/sdc /dev/sdd)
+    #[arg(required = true)]
+    devices: Vec<String>,
+
+    /// Spare Devices (e.g. /dev/sdb /dev/sdc /dev/sdd)
+    #[arg(required = false)]
+    spare: Vec<String>,
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
@@ -222,6 +289,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 reverse: false,
                 ip: Some(String::from(&args.ip)),
             })?;
+        }
+        Some(Commands::Nfs(args)) => {
+            handle_nfs(args)?;
+        }
+        Some(Commands::Backup(args)) => {
+            handle_backup(args)?;
+        }
+        Some(Commands::Raid(args)) => {
+            handle_raid(args)?;
         }
         None => {}
     }
@@ -683,6 +759,134 @@ fn handle_blacklist_add(args: &BlacklistArgs) -> Result<(), Box<dyn std::error::
         record_type: DnsRecordType::A,
         value: args.ip.clone(),
     })?;
+
+    Ok(())
+}
+
+fn handle_nfs(args: &NfsArgs) -> io::Result<()> {
+    let exports_path = "/etc/exports";
+    let content = fs::read_to_string(exports_path).unwrap_or_default();
+
+    let entry = format!("{} {}({})", args.path, args.client, args.options);
+
+    let mut lines: Vec<String> = content.lines().map(|s| s.to_string()).collect();
+
+    match args.action {
+        NfsAction::Add => {
+            if !lines.iter().any(|l| l.contains(&args.path)) {
+                lines.push(entry);
+            }
+        }
+        NfsAction::Remove => {
+            lines.retain(|l| !l.contains(&args.path));
+        }
+        NfsAction::Update => {
+            lines.retain(|l| !l.contains(&args.path));
+            lines.push(entry);
+        }
+        NfsAction::Disable => {
+            for line in &mut lines {
+                if line.contains(&args.path) && !line.starts_with('#') {
+                    *line = format!("#{}", line);
+                }
+            }
+        }
+    }
+
+    fs::write(exports_path, lines.join("\n"))?;
+
+    std::process::Command::new("systemctl")
+        .arg("restart")
+        .arg("nfs-server")
+        .output()?;
+
+    Ok(())
+}
+
+fn handle_backup(args: &BackupArgs) -> Result<(), Box<dyn std::error::Error>> {
+    match args.action {
+        BackupAction::Tar => {
+            let output = format!(
+                "{}/system_backup_{}.tar.gz",
+                args.destination,
+                chrono::Local::now().format("%Y%m%d")
+            );
+
+            std::process::Command::new("tar")
+                .args([
+                    "-czf",
+                    &output,
+                    "/etc/passwd",
+                    "/etc/group",
+                    "/etc/shadow",
+                    "/etc/gshadow",
+                ])
+                .status()?;
+        }
+        BackupAction::Rsync => {
+            let current_dest = format!(
+                "{}/{}",
+                args.destination,
+                chrono::Local::now().format("%Y%m%d_%H%M%S")
+            );
+            let latest_link = format!("{}/latest", args.destination);
+
+            let mut rsync_cmd = std::process::Command::new("rsync");
+            rsync_cmd.args(["-avh", "--delete"]);
+
+            if std::path::Path::new(&latest_link).exists() {
+                rsync_cmd.arg(format!("--link-dest={}", latest_link));
+            }
+
+            rsync_cmd.args([&args.source, &current_dest]);
+
+            let status = rsync_cmd.status()?;
+
+            if status.success() {
+                let _ = std::fs::remove_file(&latest_link);
+                std::os::unix::fs::symlink(&current_dest, &latest_link)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_raid(args: &RaidArgs) -> Result<(), Box<dyn std::error::Error>> {
+    if args.devices.len() < 3 {
+        return Err("RAID5 requires at least 3 devices".into());
+    }
+
+    let mut cmd = std::process::Command::new("mdadm");
+    cmd.arg("--create")
+        .arg("/dev/md0")
+        .arg("--level=5")
+        .arg("--raid-devices")
+        .arg(args.devices.len().to_string());
+
+    for dev in &args.devices {
+        cmd.arg(dev);
+    }
+
+    if !args.spare.is_empty() {
+        cmd.arg("--spare-devices").arg(args.spare.len().to_string());
+
+        for dev in &args.spare {
+            cmd.arg(dev);
+        }
+    }
+
+    cmd.status()?;
+
+    std::process::Command::new("mkfs.ext4")
+        .arg("/dev/md0")
+        .status()?;
+
+    fs::create_dir_all(&args.mount_point)?;
+
+    std::process::Command::new("mount")
+        .args(["/dev/md0", &args.mount_point])
+        .status()?;
 
     Ok(())
 }
