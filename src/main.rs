@@ -364,7 +364,7 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
             }
             found_listen_on = true;
         } else if !found_allow_query && trimmed_line.starts_with("allow-query") {
-            let re = Regex::new(r"(Allow-query\s*\{[^}]*)(\};)").unwrap();
+            let re = Regex::new(r"(allow-query\s*\{[^}]*)(\};)").unwrap();
             if let Some(caps) = re.captures(&line.clone()) {
                 let current_content = caps.get(1).unwrap().as_str();
                 let closing_bracket = caps.get(2).unwrap().as_str();
