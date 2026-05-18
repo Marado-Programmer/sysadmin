@@ -396,7 +396,7 @@ fn edit_named_conf(named_conf_path: &Path, domain: &str) -> io::Result<()> {
     zone "{domain}" IN {{
         type master;
         file "/var/named/{zone_filename}";
-    }}
+    }};
     "#
     );
 
