@@ -438,15 +438,15 @@ fn create_zone_file(
     let content = match zone_type {
         ZoneType::Forward => format!(
             r#"$ttl 38400
-        @   IN  SOA {ns_fqdn}.  {soa_email}.    (
-                            {serial} ; serial
-                            10800 ; refresh
-                            3600 ; retry
-                            604800 ; expire
-                            38400 ; minimum
-                            )
-            IN  NS  {ns_fqdn}.
-            IN  A   {ip_or_network}
+@   IN  SOA {ns_fqdn}.  {soa_email}.    (
+                    {serial} ; serial
+                    10800 ; refresh
+                    3600 ; retry
+                    604800 ; expire
+                    38400 ; minimum
+                    )
+    IN  NS  {ns_fqdn}.
+    IN  A   {ip_or_network}
         "#
         ),
         ZoneType::Reverse => {
@@ -454,16 +454,16 @@ fn create_zone_file(
 
             format!(
                 r#"$ttl 38400
-            @   IN  SOA {ns_fqdn}.  {soa_email}.    (
-                                {serial} ; serial
-                                10800 ; refresh
-                                3600 ; retry
-                                604800 ; expire
-                                38400 ; minimum
-                                )
-                IN  NS  {ns_fqdn}.
-                IN  A   {ip_or_network}
-            {ptr_ip_fragment}   IN  PTR {ns_fqdn}.
+@   IN  SOA {ns_fqdn}.  {soa_email}.    (
+                    {serial} ; serial
+                    10800 ; refresh
+                    3600 ; retry
+                    604800 ; expire
+                    38400 ; minimum
+                    )
+    IN  NS  {ns_fqdn}.
+    IN  A   {ip_or_network}
+{ptr_ip_fragment}   IN  PTR {ns_fqdn}.
             "#
             )
         }
